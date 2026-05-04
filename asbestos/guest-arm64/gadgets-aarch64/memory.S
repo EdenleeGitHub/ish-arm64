@@ -1665,6 +1665,280 @@ atomic_cas_segfault:
  */
 
 /*
+ * Pre/post-indexed LDR/STR with writeback fused into one gadget.
+ *
+ * Param: rt | rn<<8 | offset<<16 (signed 32-bit imm9, sign-extended in gen.c)
+ *
+ * Pre-indexed:  effective addr = base + offset; base = base + offset
+ * Post-indexed: effective addr = base;          base = base + offset
+ *
+ * Conditions enforced by gen.c emitter: rn != 31, rt != 31, rn != rt.
+ * x26 holds new base value across read_prep/write_prep (callee-saved by C-calls).
+ */
+
+// LDR Xt, [Xn, #imm]! — pre-indexed
+.gadget ldr64_imm_preidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    ubfx x9, x22, #8, #5            // rn
+    sbfx x10, x22, #16, #32         // signed offset
+    add x11, _cpu, #CPU_x0
+    ldr x12, [x11, x9, lsl #3]
+    add x26, x12, x10               // new base = base + offset
+    and x26, x26, #0xffffffffffff
+    mov _addr, x26
+    mov x24, _addr
+    read_prep 64, ldr64_imm_preidx_fast_1
+    ldr x23, [_addr]
+    add x11, _cpu, #CPU_x0
+    and x8, x22, #0x1f              // rt
+    str x23, [x11, x8, lsl #3]
+    ubfx x9, x22, #8, #5            // rn
+    str x26, [x11, x9, lsl #3]      // writeback
+    gret
+    read_bullshit 64, ldr64_imm_preidx_fast_1
+
+// LDR Xt, [Xn], #imm — post-indexed
+.gadget ldr64_imm_postidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    add x11, _cpu, #CPU_x0
+    ldr x12, [x11, x9, lsl #3]      // base = access addr
+    and _addr, x12, #0xffffffffffff
+    mov x24, _addr
+    add x26, x12, x10               // new base
+    and x26, x26, #0xffffffffffff
+    read_prep 64, ldr64_imm_postidx_fast_1
+    ldr x23, [_addr]
+    add x11, _cpu, #CPU_x0
+    and x8, x22, #0x1f
+    str x23, [x11, x8, lsl #3]
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    read_bullshit 64, ldr64_imm_postidx_fast_1
+
+// LDR Wt, [Xn, #imm]! — pre-indexed, 32-bit
+.gadget ldr32_imm_preidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    add x11, _cpu, #CPU_x0
+    ldr x12, [x11, x9, lsl #3]
+    add x26, x12, x10
+    and x26, x26, #0xffffffffffff
+    mov _addr, x26
+    mov x24, _addr
+    read_prep 32, ldr32_imm_preidx_fast_1
+    ldr w23, [_addr]
+    add x11, _cpu, #CPU_x0
+    and x8, x22, #0x1f
+    str x23, [x11, x8, lsl #3]      // w-form already zero-extended
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    read_bullshit 32, ldr32_imm_preidx_fast_1
+
+.gadget ldr32_imm_postidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    add x11, _cpu, #CPU_x0
+    ldr x12, [x11, x9, lsl #3]
+    and _addr, x12, #0xffffffffffff
+    mov x24, _addr
+    add x26, x12, x10
+    and x26, x26, #0xffffffffffff
+    read_prep 32, ldr32_imm_postidx_fast_1
+    ldr w23, [_addr]
+    add x11, _cpu, #CPU_x0
+    and x8, x22, #0x1f
+    str x23, [x11, x8, lsl #3]
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    read_bullshit 32, ldr32_imm_postidx_fast_1
+
+// STR Xt, [Xn, #imm]! — pre-indexed
+.gadget str64_imm_preidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    and x8, x22, #0x1f              // rt
+    add x11, _cpu, #CPU_x0
+    ldr x23, [x11, x8, lsl #3]      // val
+    ubfx x9, x22, #8, #5            // rn
+    sbfx x10, x22, #16, #32
+    ldr x12, [x11, x9, lsl #3]
+    add x26, x12, x10               // new base
+    and x26, x26, #0xffffffffffff
+    mov _addr, x26
+    mov x24, _addr
+    write_prep 64, str64_imm_preidx_fast_1
+    str x23, [_addr]
+    write_done 64, str64_imm_preidx_fast_1
+    add x11, _cpu, #CPU_x0
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]      // writeback
+    gret
+    write_bullshit 64, str64_imm_preidx_fast_1
+
+.gadget str64_imm_postidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    and x8, x22, #0x1f
+    add x11, _cpu, #CPU_x0
+    ldr x23, [x11, x8, lsl #3]
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    ldr x12, [x11, x9, lsl #3]      // base = access addr
+    and _addr, x12, #0xffffffffffff
+    mov x24, _addr
+    add x26, x12, x10
+    and x26, x26, #0xffffffffffff
+    write_prep 64, str64_imm_postidx_fast_1
+    str x23, [_addr]
+    write_done 64, str64_imm_postidx_fast_1
+    add x11, _cpu, #CPU_x0
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    write_bullshit 64, str64_imm_postidx_fast_1
+
+.gadget str32_imm_preidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    and x8, x22, #0x1f
+    add x11, _cpu, #CPU_x0
+    ldr x23, [x11, x8, lsl #3]
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    ldr x12, [x11, x9, lsl #3]
+    add x26, x12, x10
+    and x26, x26, #0xffffffffffff
+    mov _addr, x26
+    mov x24, _addr
+    write_prep 32, str32_imm_preidx_fast_1
+    str w23, [_addr]
+    write_done 32, str32_imm_preidx_fast_1
+    add x11, _cpu, #CPU_x0
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    write_bullshit 32, str32_imm_preidx_fast_1
+
+.gadget str32_imm_postidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    and x8, x22, #0x1f
+    add x11, _cpu, #CPU_x0
+    ldr x23, [x11, x8, lsl #3]
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    ldr x12, [x11, x9, lsl #3]
+    and _addr, x12, #0xffffffffffff
+    mov x24, _addr
+    add x26, x12, x10
+    and x26, x26, #0xffffffffffff
+    write_prep 32, str32_imm_postidx_fast_1
+    str w23, [_addr]
+    write_done 32, str32_imm_postidx_fast_1
+    add x11, _cpu, #CPU_x0
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    write_bullshit 32, str32_imm_postidx_fast_1
+
+/*
+ * STR XZR variants — rt=31 means store zero. Skips the load-from-cpu-state
+ * step and writes directly. Same other constraints (rn != 31, etc.).
+ * Param: rn<<8 | offset<<16 (rt implicit = XZR; bits 0-4 ignored)
+ */
+
+.gadget str64_xzr_imm_preidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    add x11, _cpu, #CPU_x0
+    ldr x12, [x11, x9, lsl #3]
+    add x26, x12, x10
+    and x26, x26, #0xffffffffffff
+    mov _addr, x26
+    mov x24, _addr
+    write_prep 64, str64_xzr_imm_preidx_fast_1
+    str xzr, [_addr]
+    write_done 64, str64_xzr_imm_preidx_fast_1
+    add x11, _cpu, #CPU_x0
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    write_bullshit 64, str64_xzr_imm_preidx_fast_1
+
+.gadget str64_xzr_imm_postidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    add x11, _cpu, #CPU_x0
+    ldr x12, [x11, x9, lsl #3]
+    and _addr, x12, #0xffffffffffff
+    mov x24, _addr
+    add x26, x12, x10
+    and x26, x26, #0xffffffffffff
+    write_prep 64, str64_xzr_imm_postidx_fast_1
+    str xzr, [_addr]
+    write_done 64, str64_xzr_imm_postidx_fast_1
+    add x11, _cpu, #CPU_x0
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    write_bullshit 64, str64_xzr_imm_postidx_fast_1
+
+.gadget str32_xzr_imm_preidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    add x11, _cpu, #CPU_x0
+    ldr x12, [x11, x9, lsl #3]
+    add x26, x12, x10
+    and x26, x26, #0xffffffffffff
+    mov _addr, x26
+    mov x24, _addr
+    write_prep 32, str32_xzr_imm_preidx_fast_1
+    str wzr, [_addr]
+    write_done 32, str32_xzr_imm_preidx_fast_1
+    add x11, _cpu, #CPU_x0
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    write_bullshit 32, str32_xzr_imm_preidx_fast_1
+
+.gadget str32_xzr_imm_postidx_fast
+    ldr x22, [_pc]
+    add _pc, _pc, #8
+    ubfx x9, x22, #8, #5
+    sbfx x10, x22, #16, #32
+    add x11, _cpu, #CPU_x0
+    ldr x12, [x11, x9, lsl #3]
+    and _addr, x12, #0xffffffffffff
+    mov x24, _addr
+    add x26, x12, x10
+    and x26, x26, #0xffffffffffff
+    write_prep 32, str32_xzr_imm_postidx_fast_1
+    str wzr, [_addr]
+    write_done 32, str32_xzr_imm_postidx_fast_1
+    add x11, _cpu, #CPU_x0
+    ubfx x9, x22, #8, #5
+    str x26, [x11, x9, lsl #3]
+    gret
+    write_bullshit 32, str32_xzr_imm_postidx_fast_1
+
+/*
  * SP-base variants: rn == 31 (i.e. SP). Used for function prologue/epilogue
  * `STP X29, X30, [SP, #-N]!` and `LDP X29, X30, [SP], #N`.
  * Param: rt | rt2<<8 | offset<<16  (offset signed 32-bit; rn implicit = SP)

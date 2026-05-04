@@ -153,6 +153,18 @@ extern void gadget_ldp64_imm_preidx_sp(void);
 extern void gadget_ldp64_imm_postidx_sp(void);
 extern void gadget_stp64_imm_preidx_sp(void);
 extern void gadget_stp64_imm_postidx_sp(void);
+extern void gadget_ldr64_imm_preidx_fast(void);
+extern void gadget_ldr64_imm_postidx_fast(void);
+extern void gadget_ldr32_imm_preidx_fast(void);
+extern void gadget_ldr32_imm_postidx_fast(void);
+extern void gadget_str64_imm_preidx_fast(void);
+extern void gadget_str64_imm_postidx_fast(void);
+extern void gadget_str32_imm_preidx_fast(void);
+extern void gadget_str32_imm_postidx_fast(void);
+extern void gadget_str64_xzr_imm_preidx_fast(void);
+extern void gadget_str64_xzr_imm_postidx_fast(void);
+extern void gadget_str32_xzr_imm_preidx_fast(void);
+extern void gadget_str32_xzr_imm_postidx_fast(void);
 
 // Per-condition bcond gadgets
 extern void gadget_bcond_eq(void);
@@ -2735,6 +2747,43 @@ static int gen_ldst(struct gen_state *state, uint32_t insn) {
                     case 1: g = gadget_store16_imm_signed_fast; break;
                     case 2: g = gadget_store32_imm_signed_fast; break;
                     case 3: g = gadget_store64_imm_signed_fast; break;
+                }
+            }
+            if (g != NULL) {
+                gen(state, (unsigned long) g);
+                gen(state, param);
+                return 1;
+            }
+        }
+
+        // Pre/post-indexed fast path (single fused gadget): non-SP base,
+        // non-XZR data, disjoint base/data, 32 or 64-bit width, no sign-extend.
+        // Replaces the calc_addr + load/store + store_reg + writeback chain
+        // (4 gadget dispatches → 1).
+        // Pre/post-indexed fast paths.
+        // - Generic: rn != 31, rt != 31, !(load && rt==rn), size in {2,3}, no sign-extend.
+        // - STR XZR: rn != 31, rt == 31, !is_load (store XZR is "store zero" idiom).
+        // For LDR post-indexed where rt == rn, ARM CONSTRAINED UNPREDICTABLE behaviour;
+        // we fall back to the 4-gadget chain rather than risk a wrong write order.
+        if (!is_unscaled && rn != 31 && (size == 2 || size == 3)) {
+            uint64_t param = (uint64_t)(rt & 0x1f)
+                           | ((uint64_t)(rn & 0x1f) << 8)
+                           | (((uint64_t)(uint32_t)(int32_t)imm9) << 16);
+            void *g = NULL;
+            if (is_load) {
+                if (rt != 31 && rn != rt && !(opc & 2)) {
+                    if (size == 3) g = is_pre_indexed ? gadget_ldr64_imm_preidx_fast : gadget_ldr64_imm_postidx_fast;
+                    else            g = is_pre_indexed ? gadget_ldr32_imm_preidx_fast : gadget_ldr32_imm_postidx_fast;
+                }
+            } else {
+                // Store
+                if (rt != 31) {
+                    if (size == 3) g = is_pre_indexed ? gadget_str64_imm_preidx_fast : gadget_str64_imm_postidx_fast;
+                    else            g = is_pre_indexed ? gadget_str32_imm_preidx_fast : gadget_str32_imm_postidx_fast;
+                } else {
+                    // STR XZR — store zero
+                    if (size == 3) g = is_pre_indexed ? gadget_str64_xzr_imm_preidx_fast : gadget_str64_xzr_imm_postidx_fast;
+                    else            g = is_pre_indexed ? gadget_str32_xzr_imm_preidx_fast : gadget_str32_xzr_imm_postidx_fast;
                 }
             }
             if (g != NULL) {
