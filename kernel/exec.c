@@ -1,5 +1,6 @@
 #include "kernel/signal.h"
 #include "task.h"
+#include "util/signpost.h"
 #define _GNU_SOURCE
 #include <unistd.h>
 #include <fcntl.h>
@@ -658,6 +659,8 @@ static int shebang_exec(struct fd *fd, const char *file, struct exec_args argv, 
 }
 
 int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) {
+    ISH_SIGNPOST_SCOPE_BEGIN(exec, "execve", _exec_spid);
+    ISH_SIGNPOST_EVENT(exec, "execve_path", "path=%{public}s", file);
     // New program starts fresh — clear V8 abort-in-progress flag so the
     // fresh process's stderr isn't permanently muted from a prior abort.
     if (current && current->group)
@@ -736,6 +739,7 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) 
         unlock(&pids_lock);
     }
 
+    ISH_SIGNPOST_SCOPE_END(exec, "execve", _exec_spid);
     return 0;
 }
 
@@ -866,6 +870,11 @@ dword_t sys_execve(addr_t filename_addr, addr_t argv_addr, addr_t envp_addr) {
         // page table modifications. GOMAXPROCS=2 is sufficient for most Go CLI
         // tools and eliminates nearly all multi-thread race conditions.
         { "GOMAXPROCS=2", 11, 0 },             // Limit Go thread count
+        // libuv's default worker pool is 4 threads. On iSH jitless node,
+        // short scripts never use them but pay the futex sync cost. Setting
+        // to 1 saves ~1s on `node -e 0`. Apps that genuinely need more
+        // worker threads can override via the user environment (mode=0).
+        { "UV_THREADPOOL_SIZE=1", 19, 0 },
     };
     for (size_t vi = 0; vi < sizeof(inject_envs)/sizeof(inject_envs[0]); vi++) {
         char *e = envp;
@@ -912,13 +921,23 @@ dword_t sys_execve(addr_t filename_addr, addr_t argv_addr, addr_t envp_addr) {
                 "--jitless",
                 "--no-lazy",
                 "--max-old-space-size=512",
+                // Force single-threaded V8: in jitless mode the worker pool
+                // has no JIT to do, but V8 still creates the threads and
+                // they spend ~3s/startup blocked on futex/epoll waiting for
+                // the (slow, emulated) main thread. Disabling them cuts
+                // `node -e 0` from 2.3s → 0.35s on iSH ARM64. Validated
+                // 2026-05-05 via syscall profile.
+                "--no-concurrent-marking",
+                "--no-concurrent-recompilation",
+                "--no-lazy-compile-dispatcher",
+                "--predictable",
             };
             // Conditionally inject --require for polyfill files that exist in guest fs
             static const char *optional_requires[] = {
                 "--require=/lib/wasm-polyfill.js",    // WebAssembly shim (must load first)
                 "--require=/lib/fetch-polyfill.js",   // fetch() via native http/https
             };
-            const char *inject_args[8]; // base args + optional requires
+            const char *inject_args[16]; // base args + optional requires
             size_t inject_count = 0;
             for (size_t i = 0; i < sizeof(inject_args_base)/sizeof(inject_args_base[0]); i++)
                 inject_args[inject_count++] = inject_args_base[i];

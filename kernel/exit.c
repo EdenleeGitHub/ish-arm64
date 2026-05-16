@@ -52,6 +52,12 @@ static struct task *find_new_parent(struct task *task) {
 }
 
 noreturn void do_exit(int status) {
+    if (current && current->pid == 1) {
+        extern void dump_pc_hist(void);
+        extern void dump_pc_trace(void);
+        dump_pc_hist();
+        dump_pc_trace();
+    }
     // If this thread was already marked as leaked by the safety valve,
     // the group leader has finished exiting and the group struct may be
     // freed. Don't touch any shared state — just kill the host thread.
@@ -187,6 +193,14 @@ noreturn void do_exit(int status) {
 }
 
 noreturn void do_exit_group(int status) {
+#ifdef ISH_GADGET_PROFILE
+    extern void dump_gadget_profile(void);
+    static int dumped = 0;
+    if (!dumped && current && current->pid == 1) {
+        dumped = 1;
+        dump_gadget_profile();
+    }
+#endif
     // Leaked thread woke up after group already exited — bail silently.
     if (current->exiting) {
         current = NULL;
@@ -395,6 +409,8 @@ static void halt_system(void) {
     // _exit() does not call atexit handlers, so we must do this explicitly.
     extern void restore_termios(void);
     restore_termios();
+    extern void dump_pc_hist(void);
+    dump_pc_hist();
 
     // Force exit the entire host process. Orphaned guest threads
     // (stuck in JIT loops after do_exit_group force cleanup) keep
