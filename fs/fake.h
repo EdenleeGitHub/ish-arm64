@@ -111,4 +111,22 @@ typedef bool (*fakefs_path_translate_hook_t)(
 
 void fakefs_set_path_translate_hook(fakefs_path_translate_hook_t hook);
 
+/* Optional reverse counterpart to the forward path-translate hook. Called
+ * from realfs_getpath() to map a host APFS path (as returned by F_GETPATH
+ * on a bind-mounted fd) back to its guest path. iSH consults this hook
+ * after the static g_bind_mounts[] table; return true and write the guest
+ * path into `out_guest_path` to override. The hook does not receive an
+ * fs_context — F_GETPATH is per-fd, and the host path itself uniquely
+ * identifies which bind-mount target was resolved.
+ *
+ * Same hot-path contract as the forward hook: must be reentrant and non-
+ * blocking.
+ */
+typedef bool (*fakefs_path_reverse_hook_t)(
+    const char *host_path,
+    char *out_guest_path,
+    size_t out_size);
+
+void fakefs_set_path_reverse_hook(fakefs_path_reverse_hook_t hook);
+
 #endif

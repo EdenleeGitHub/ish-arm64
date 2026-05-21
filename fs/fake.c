@@ -108,6 +108,21 @@ struct fakefs_bind_mount {
 static struct fakefs_bind_mount g_bind_mounts[FAKEFS_MAX_BIND_MOUNTS];
 struct mount *g_fakefs_mount = NULL;
 
+/* Optional host-provided override hooks for guest↔host path translation.
+ * NULL unless host registers via fakefs_set_path_*_hook(). Defined here
+ * (before resolve_path() / bind_mount_translate_path() so both directions
+ * can consult them). */
+static _Atomic(fakefs_path_translate_hook_t) g_path_translate_hook = NULL;
+static _Atomic(fakefs_path_reverse_hook_t) g_path_reverse_hook = NULL;
+
+void fakefs_set_path_translate_hook(fakefs_path_translate_hook_t hook) {
+    atomic_store_explicit(&g_path_translate_hook, hook, memory_order_release);
+}
+
+void fakefs_set_path_reverse_hook(fakefs_path_reverse_hook_t hook) {
+    atomic_store_explicit(&g_path_reverse_hook, hook, memory_order_release);
+}
+
 /* Translate a resolved host path back to a Linux path for bind mounts.
  * e.g. "/Users/.../MinisChat/minis/<sid>/attachments/file.mp4"
  *   -> "/var/minis/attachments/file.mp4"
@@ -138,6 +153,13 @@ bool fakefs_bind_mount_resolve_path(const char *resolved, char *out_path, size_t
             }
         }
     }
+    /* Static table miss — fall through to the host-provided reverse hook
+     * if one is registered. The hook knows about per-context routes that
+     * are not in g_bind_mounts[]. */
+    fakefs_path_reverse_hook_t reverse =
+        atomic_load_explicit(&g_path_reverse_hook, memory_order_acquire);
+    if (reverse != NULL && reverse(resolved, out_path, out_size))
+        return true;
     return false;
 }
 
@@ -146,15 +168,6 @@ bool fakefs_bind_mount_resolve_path(const char *resolved, char *out_path, size_t
  * Returns true and writes to out_path if the path is under a bind mount. */
 /* Public wrapper for native offload handlers. See fake.h. */
 bool fakefs_bind_mount_translate_path(const char *path, char *out_path, size_t out_size);
-
-/* Optional host-provided override for guest→host path translation. NULL
- * unless the host calls fakefs_set_path_translate_hook(). When set, it is
- * consulted before the static g_bind_mounts[] table on every translation. */
-static _Atomic(fakefs_path_translate_hook_t) g_path_translate_hook = NULL;
-
-void fakefs_set_path_translate_hook(fakefs_path_translate_hook_t hook) {
-    atomic_store_explicit(&g_path_translate_hook, hook, memory_order_release);
-}
 
 static bool bind_mount_translate_path(const char *path, char *out_path, size_t out_size) {
     /* Normalize: if path lacks leading /, prepend it for comparison.
