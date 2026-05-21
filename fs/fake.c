@@ -142,11 +142,19 @@ bool fakefs_bind_mount_resolve_path(const char *resolved, char *out_path, size_t
 }
 
 /* Translate a Linux path to a host absolute path if under a bind mount.
- * E.g. "/var/minis/skills/foo" -> "/var/mobile/.../Library/MinisChat/skills/foo"
- * Handles both "/var/minis/..." (with leading /) and "var/minis/..." (without).
+ * Handles both leading-slash and no-leading-slash forms.
  * Returns true and writes to out_path if the path is under a bind mount. */
 /* Public wrapper for native offload handlers. See fake.h. */
 bool fakefs_bind_mount_translate_path(const char *path, char *out_path, size_t out_size);
+
+/* Optional host-provided override for guest→host path translation. NULL
+ * unless the host calls fakefs_set_path_translate_hook(). When set, it is
+ * consulted before the static g_bind_mounts[] table on every translation. */
+static _Atomic(fakefs_path_translate_hook_t) g_path_translate_hook = NULL;
+
+void fakefs_set_path_translate_hook(fakefs_path_translate_hook_t hook) {
+    atomic_store_explicit(&g_path_translate_hook, hook, memory_order_release);
+}
 
 static bool bind_mount_translate_path(const char *path, char *out_path, size_t out_size) {
     /* Normalize: if path lacks leading /, prepend it for comparison.
@@ -156,6 +164,17 @@ static bool bind_mount_translate_path(const char *path, char *out_path, size_t o
     if (path[0] != '/') {
         snprintf(normalized, sizeof(normalized), "/%s", path);
         cmp_path = normalized;
+    }
+    /* Host-provided hook wins over the static table. The hook sees the
+     * normalized (leading-slash) path and the calling task's fs_context. */
+    fakefs_path_translate_hook_t hook =
+        atomic_load_explicit(&g_path_translate_hook, memory_order_acquire);
+    if (hook != NULL) {
+        uint64_t ctx = 0;
+        if (current != NULL && current->group != NULL)
+            ctx = current->group->fs_context;
+        if (hook(cmp_path, ctx, out_path, out_size))
+            return true;
     }
     for (int i = 0; i < FAKEFS_MAX_BIND_MOUNTS; i++) {
         if (!g_bind_mounts[i].active)
@@ -374,14 +393,31 @@ static int fakefs_unlink(struct mount *mount, const char *path) {
     /* Auto-create entry if under bind mount so path_unlink won't die */
     if (is_under_bind_mount(path))
         bind_mount_ensure_inode(fs, mount, path);
+    /* Bind-mount fast path: delete directly on the translated host abs path
+     * instead of going through realfs (which would unlinkat() under
+     * mount->root_fd and hit the symlink-target's host dir — wrong target
+     * once a path-translate hook redirects per-fs_context). */
+    char host_abs[PATH_MAX];
+    bool via_bind = bind_mount_translate_path(path, host_abs, sizeof(host_abs));
     db_begin_write(fs);
-    int err = realfs.unlink(mount, path);
-    if (err < 0) {
-        db_rollback(fs);
-        return err;
+    int err;
+    if (via_bind) {
+        if (unlink(host_abs) < 0) {
+            err = errno_map();
+            db_rollback(fs);
+            return err;
+        }
+    } else {
+        err = realfs.unlink(mount, path);
+        if (err < 0) {
+            db_rollback(fs);
+            return err;
+        }
     }
     ino_t ino = path_unlink(fs, path);
     db_commit(fs);
+    if (via_bind)
+        fakefs_record_change(path, FAKEFS_CHANGE_OP_UNLINK);
     inode_check_orphaned(mount, ino);
     return 0;
 }
@@ -393,14 +429,27 @@ static int fakefs_rmdir(struct mount *mount, const char *path) {
     /* Auto-create entry if under bind mount so path_unlink won't die */
     if (is_under_bind_mount(path))
         bind_mount_ensure_inode(fs, mount, path);
+    char host_abs[PATH_MAX];
+    bool via_bind = bind_mount_translate_path(path, host_abs, sizeof(host_abs));
     db_begin_write(fs);
-    int err = realfs.rmdir(mount, path);
-    if (err < 0) {
-        db_rollback(fs);
-        return err;
+    int err;
+    if (via_bind) {
+        if (rmdir(host_abs) < 0) {
+            err = errno_map();
+            db_rollback(fs);
+            return err;
+        }
+    } else {
+        err = realfs.rmdir(mount, path);
+        if (err < 0) {
+            db_rollback(fs);
+            return err;
+        }
     }
     ino_t ino = path_unlink(fs, path);
     db_commit(fs);
+    if (via_bind)
+        fakefs_record_change(path, FAKEFS_CHANGE_OP_UNLINK);
     inode_check_orphaned(mount, ino);
     return 0;
 }
@@ -409,14 +458,33 @@ static int fakefs_rename(struct mount *mount, const char *src, const char *dst) 
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(src) || is_under_readonly_bind_mount(dst))
         return _EROFS;
+    /* If either endpoint is under a bind mount, both must be — cross-fs
+     * rename isn't supported and translating only one side would silently
+     * detach the file from its meta.db row. */
+    char host_src[PATH_MAX], host_dst[PATH_MAX];
+    bool src_bind = bind_mount_translate_path(src, host_src, sizeof(host_src));
+    bool dst_bind = bind_mount_translate_path(dst, host_dst, sizeof(host_dst));
+    if (src_bind != dst_bind)
+        return _EXDEV;
     db_begin_write(fs);
     path_rename(fs, src, dst);
-    int err = realfs.rename(mount, src, dst);
-    if (err < 0) {
-        db_rollback(fs);
-        return err;
+    int err;
+    if (src_bind) {
+        if (rename(host_src, host_dst) < 0) {
+            err = errno_map();
+            db_rollback(fs);
+            return err;
+        }
+    } else {
+        err = realfs.rename(mount, src, dst);
+        if (err < 0) {
+            db_rollback(fs);
+            return err;
+        }
     }
     db_commit(fs);
+    if (src_bind)
+        fakefs_record_change(dst, FAKEFS_CHANGE_OP_RENAME);
     return 0;
 }
 
@@ -623,11 +691,22 @@ static int fakefs_mkdir(struct mount *mount, const char *path, mode_t_ mode) {
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(path))
         return _EROFS;
+    char host_abs[PATH_MAX];
+    bool via_bind = bind_mount_translate_path(path, host_abs, sizeof(host_abs));
     db_begin_write(fs);
-    int err = realfs.mkdir(mount, path, 0777);
-    if (err < 0) {
-        db_rollback(fs);
-        return err;
+    int err;
+    if (via_bind) {
+        if (mkdir(host_abs, 0777) < 0) {
+            err = errno_map();
+            db_rollback(fs);
+            return err;
+        }
+    } else {
+        err = realfs.mkdir(mount, path, 0777);
+        if (err < 0) {
+            db_rollback(fs);
+            return err;
+        }
     }
     struct ish_stat ishstat;
     ishstat.mode = mode | S_IFDIR;
@@ -636,6 +715,8 @@ static int fakefs_mkdir(struct mount *mount, const char *path, mode_t_ mode) {
     ishstat.rdev = 0;
     path_create(fs, path, &ishstat);
     db_commit(fs);
+    if (via_bind)
+        fakefs_record_change(path, FAKEFS_CHANGE_OP_WRITE);
     return 0;
 }
 
@@ -1134,6 +1215,8 @@ void fakefs_record_change(const char *linux_path, int op) {
     strlcpy(slot->linux_path, linux_path, sizeof(slot->linux_path));
     slot->op = op;
     slot->timestamp_ns = (int64_t)mach_absolute_time();
+    slot->fs_context = (current != NULL && current->group != NULL)
+        ? current->group->fs_context : 0;
     atomic_store_explicit(&g_change_head, head + 1, memory_order_release);
     os_unfair_lock_unlock(&g_change_ring_lock);
 
