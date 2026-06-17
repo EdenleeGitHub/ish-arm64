@@ -1,0 +1,85 @@
+name: Build iOS12 Unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+
+jobs:
+  build-ios12-unsigned:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Build Dependencies
+        run: |
+          brew install ninja lld llvm meson
+
+      - name: Resolve project and scheme
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="iSH.xcodeproj"
+          scheme="iSH"
+          if [[ ! -d "$project" ]]; then
+            project="$(ls -1 *.xcodeproj | head -n 1)"
+          fi
+          if ! xcodebuild -list -project "$project" | grep -q "^[[:space:]]\+$scheme$"; then
+            scheme="$(xcodebuild -list -project "$project" | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag{gsub(/^[ \t]+/,\"\");print}' | head -n 1)"
+          fi
+          if [[ -z "$scheme" ]]; then
+            echo "No buildable scheme found." >&2
+            exit 1
+          fi
+          echo "project=$project" >> "$GITHUB_OUTPUT"
+          echo "scheme=$scheme" >> "$GITHUB_OUTPUT"
+          echo "Using project=$project scheme=$scheme"
+
+      - name: Build unsigned .app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "${{ steps.xcode.outputs.project }}" \
+            -scheme "${{ steps.xcode.outputs.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
+
+      - name: Pack unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find . -type d -path "*/Release-iphoneos/*.app" | head -n 1)"
+          if [[ -z "$app_path" ]]; then
+            echo "No .app found under Release-iphoneos." >&2
+            exit 1
+          fi
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$app_path" Payload/
+          /usr/bin/zip -r "iSH-arm64-ios12-unsigned.ipa" Payload
+
+      - name: Verify IPA payload structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -l "iSH-arm64-ios12-unsigned.ipa" | grep "Payload/.*\.app/"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iSH-arm64-ios12-unsigned
+          path: iSH-arm64-ios12-unsigned.ipa
