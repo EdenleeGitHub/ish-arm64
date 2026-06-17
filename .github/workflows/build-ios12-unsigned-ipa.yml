@@ -62,9 +62,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_path="$(find . -type d -path "*/Release-iphoneos/*.app" | head -n 1)"
+          target_build_dir="$(
+            xcodebuild \
+              -project "${{ steps.xcode.outputs.project }}" \
+              -scheme "${{ steps.xcode.outputs.scheme }}" \
+              -configuration Release \
+              -sdk iphoneos \
+              -destination "generic/platform=iOS" \
+              -showBuildSettings 2>/dev/null | awk -F ' = ' '/ TARGET_BUILD_DIR = /{print $2; exit}'
+          )"
+          wrapper_name="$(
+            xcodebuild \
+              -project "${{ steps.xcode.outputs.project }}" \
+              -scheme "${{ steps.xcode.outputs.scheme }}" \
+              -configuration Release \
+              -sdk iphoneos \
+              -destination "generic/platform=iOS" \
+              -showBuildSettings 2>/dev/null | awk -F ' = ' '/ WRAPPER_NAME = /{print $2; exit}'
+          )"
+          app_path="${target_build_dir}/${wrapper_name}"
           if [[ -z "$app_path" ]]; then
             echo "No .app found under Release-iphoneos." >&2
+            exit 1
+          fi
+          if [[ ! -d "$app_path" ]]; then
+            echo "Resolved app path does not exist: $app_path" >&2
             exit 1
           fi
           rm -rf Payload
